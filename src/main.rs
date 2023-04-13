@@ -1,17 +1,16 @@
 use color_eyre::Result;
-use reviewporter;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     configure_logging()?;
-    let Some(config_path) = std::env::args().skip(1).next() else {
+    let Some(config_path) = std::env::args().nth(1) else {
         println!("Usage: revp <path to config>");
         return Ok(());
     };
     tracing::info!("Config path: {config_path}");
-    reviewporter::run(&std::path::Path::new(&config_path)).await
+    reviewporter::run(std::path::Path::new(&config_path)).await
 }
 
 fn configure_logging() -> Result<()> {

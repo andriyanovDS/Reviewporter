@@ -1,37 +1,55 @@
-use std::error::Error;
-use std::fmt::Display;
-
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use color_eyre::Result;
+use futures::TryFutureExt;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::fmt::{Display, Formatter};
 use url::Url;
 
+#[derive(Deserialize, Debug)]
+struct PullRequestAuthor {
+    #[serde(rename = "displayName")]
+    name: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestReviewer {
+    id: String,
+    #[serde(default)]
+    is_required: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 struct PullRequest {
     title: String,
+    url: Url,
+    created_by: PullRequestAuthor,
     creation_date: DateTime<Utc>,
-    link: Url,
+    reviewers: Vec<PullRequestReviewer>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Identifier(String);
 
 #[derive(Deserialize, Debug)]
-struct Identity {
+struct Reviewer {
     id: Identifier,
     #[serde(rename = "displayName")]
     name: String,
+    #[serde(default)]
+    is_container: bool,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct Reviewer {
-    identity: Identity,
+struct ReviewerContainer {
+    identity: Reviewer,
 }
 
 #[derive(Deserialize, Debug)]
 struct Team {
-    id: Identifier,
     name: String,
 }
 
@@ -40,10 +58,21 @@ struct Response<T> {
     value: T,
 }
 
+struct RepoRequests {
+    repo_id: String,
+    pull_requests: Vec<PullRequest>,
+}
+
+pub struct ReviewerRequests {
+    reviewer_name: String,
+    repo_requests: Vec<RepoRequests>,
+}
+
 pub struct AzureHostingService {
     token: String,
     base_url: Url,
     project: String,
+    repositories: Vec<String>,
     client: Client,
 }
 
@@ -62,24 +91,50 @@ impl ApiVersion {
 }
 
 impl AzureHostingService {
-    pub fn new(token: String, base_url: Url, project: String) -> Self {
+    pub fn new(token: String, base_url: Url, project: String, repositories: Vec<String>) -> Self {
         Self {
             token,
             base_url,
             project,
+            repositories,
             client: Client::new(),
         }
     }
 
-    pub async fn pull_requests(&self) -> Result<()> {
+    pub async fn pull_requests(&self) -> Result<Vec<ReviewerRequests>> {
         let teams = self.get_teams().await?;
         let dev_team = teams.into_iter().find(|v| v.name == "iOS Developers Team");
         let Some(dev_team) = dev_team else {
             tracing::info!("Team was not found.");
-            return Ok(());
+            return Ok(vec![]);
         };
         let members = self.team_members(dev_team.name).await?;
-        Ok(())
+        let requests_iter = members.into_iter().map(|reviewer| {
+            let requests = self.repositories.iter().map(|repo_id| {
+                let repo_id = repo_id.clone();
+                self.reviewer_pull_requests(repo_id.clone(), reviewer.id.0.clone())
+                    .map_ok(move |pull_requests| RepoRequests {
+                        repo_id,
+                        pull_requests,
+                    })
+            });
+            let reviewer_name = reviewer.name.clone();
+            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
+                reviewer_name,
+                repo_requests: repo_requests
+                    .into_iter()
+                    .filter(|r| !r.pull_requests.is_empty())
+                    .collect(),
+            })
+        });
+        futures::future::try_join_all(requests_iter)
+            .map_ok(|reviewers| {
+                reviewers
+                    .into_iter()
+                    .filter(|r| !r.repo_requests.is_empty())
+                    .collect()
+            })
+            .await
     }
 
     async fn team_members(&self, team_id: String) -> Result<Vec<Reviewer>> {
@@ -87,9 +142,19 @@ impl AzureHostingService {
             "_apis/projects/{}/teams/{}/members",
             self.project, team_id
         ))?;
-        self.make_request::<Vec<Reviewer>>(url, ApiVersion::Six)
+        self.make_request::<Vec<ReviewerContainer>>(url, ApiVersion::Six)
             .await
-            .map(|v| v.value)
+            .map(|v| {
+                v.into_iter()
+                    .filter_map(|v| {
+                        if v.identity.is_container {
+                            None
+                        } else {
+                            Some(v.identity)
+                        }
+                    })
+                    .collect()
+            })
     }
 
     async fn get_teams(&self) -> Result<Vec<Team>> {
@@ -98,16 +163,46 @@ impl AzureHostingService {
             .join(&format!("_apis/projects/{}/teams", self.project))?;
         self.make_request::<Vec<Team>>(url, ApiVersion::SixPreview3)
             .await
-            .map(|v| v.value)
+    }
+
+    async fn reviewer_pull_requests(
+        &self,
+        repository_id: String,
+        reviewer_id: String,
+    ) -> Result<Vec<PullRequest>> {
+        let mut url = self.base_url.join(&format!(
+            "{}/_apis/git/repositories/{}/pullrequests",
+            self.project, repository_id
+        ))?;
+        let queries = [
+            ("searchCriteria.reviewerId", reviewer_id.as_str()),
+            ("searchCriteria.status", "active"),
+        ];
+        url.query_pairs_mut().extend_pairs(queries);
+        let requests = self
+            .make_request::<Vec<PullRequest>>(url, ApiVersion::Six)
+            .await?;
+        let requests = requests
+            .into_iter()
+            .filter(|v| {
+                v.reviewers
+                    .iter()
+                    .any(|r| r.is_required && r.id == reviewer_id)
+            })
+            .collect();
+        Ok(requests)
     }
 
     async fn make_request<T: DeserializeOwned>(
         &self,
         mut url: Url,
         api_version: ApiVersion,
-    ) -> Result<Response<T>> {
+    ) -> Result<T> {
+        let query = [api_version.query()];
+        url.query_pairs_mut()
+            .extend_keys_only::<[&str; 1], &str>(query);
         tracing::info!("Executing GET request with url: {url}");
-        url.set_query(Some(api_version.query()));
+
         let request = self
             .client
             .get(url)
@@ -115,6 +210,56 @@ impl AzureHostingService {
             .build()?;
         let response = self.client.execute(request).await?;
         let response = response.json::<Response<T>>().await;
-        response.map_err(color_eyre::Report::new)
+        response.map(|v| v.value).map_err(color_eyre::Report::new)
+    }
+}
+
+impl Display for ReviewerRequests {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Hey, {}!", self.reviewer_name)?;
+        writeln!(
+            f,
+            "Just a friendly reminder that there are a pull requests waiting for your review."
+        )?;
+        writeln!(f)?;
+        for repository in &self.repo_requests {
+            repository.fmt(f)?;
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for RepoRequests {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.pull_requests.is_empty() {
+            return Ok(());
+        }
+        writeln!(f, "Repository: {}", self.repo_id)?;
+        let date_now = Utc::now();
+        for pull_request in &self.pull_requests {
+            write!(f, "- <{}|{}>", pull_request.url, pull_request.title)?;
+            write!(f, " Author: {}", pull_request.created_by.name)?;
+            write_formatted_duration(date_now - pull_request.creation_date, f);
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
+fn write_formatted_duration(duration: Duration, f: &mut Formatter<'_>) {
+    let mut append_value = |value: i64, label: &str| {
+        if value > 0 {
+            write!(f, " {}{}", value, label).unwrap();
+        }
+    };
+    let days = duration.num_days();
+    append_value(days, "d");
+    append_value(duration.num_hours() % 24, "h");
+    append_value(duration.num_minutes() % 60, "m");
+    write!(f, " ago").unwrap();
+
+    if days > 0 {
+        write!(f, " 🔥").unwrap();
     }
 }
