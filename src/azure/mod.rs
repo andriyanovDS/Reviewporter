@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use color_eyre::Result;
 use futures::TryFutureExt;
-use reqwest::Client;
+use reqwest::{header::AUTHORIZATION, Client};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::fmt::{Display, Formatter};
@@ -64,15 +64,15 @@ struct RepoRequests {
 }
 
 pub struct ReviewerRequests {
-    reviewer_name: String,
+    pub reviewer_name: String,
     repo_requests: Vec<RepoRequests>,
 }
 
-pub struct AzureHostingService {
-    token: String,
-    base_url: Url,
-    project: String,
-    repositories: Vec<String>,
+pub struct AzureHostingService<'a> {
+    token: &'a str,
+    base_url: &'a Url,
+    project: &'a str,
+    repositories: &'a [String],
     client: Client,
 }
 
@@ -90,8 +90,13 @@ impl ApiVersion {
     }
 }
 
-impl AzureHostingService {
-    pub fn new(token: String, base_url: Url, project: String, repositories: Vec<String>) -> Self {
+impl<'a> AzureHostingService<'a> {
+    pub fn new(
+        token: &'a str,
+        base_url: &'a Url,
+        project: &'a str,
+        repositories: &'a [String],
+    ) -> Self {
         Self {
             token,
             base_url,
@@ -122,12 +127,12 @@ impl AzureHostingService {
                     })
             });
             let reviewer_name = reviewer.name.clone();
-            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {         
+            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
                 reviewer_name,
                 repo_requests: repo_requests
                     .into_iter()
                     .filter(|r| !r.pull_requests.is_empty())
-                    .collect()
+                    .collect(),
             })
         });
         futures::future::try_join_all(requests_iter)
@@ -149,13 +154,7 @@ impl AzureHostingService {
             .await
             .map(|v| {
                 v.into_iter()
-                    .filter_map(|v| {
-                        if v.identity.is_container {
-                            None
-                        } else {
-                            Some(v.identity)
-                        }
-                    })
+                    .filter_map(|v| (!v.identity.is_container).then_some(v.identity))
                     .collect()
             })
     }
@@ -209,7 +208,7 @@ impl AzureHostingService {
         let request = self
             .client
             .get(url)
-            .header("Authorization", format!("Basic {}", self.token))
+            .header(AUTHORIZATION, format!("Basic {}", self.token))
             .build()?;
         let response = self.client.execute(request).await?;
         let response = response.json::<Response<T>>().await;
@@ -219,10 +218,10 @@ impl AzureHostingService {
 
 impl Display for ReviewerRequests {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Hey, {}!", self.reviewer_name)?;
+        writeln!(f, "Hey!")?;
         writeln!(
             f,
-            "Just a friendly reminder that there are a pull requests waiting for your review."
+            "Just a friendly reminder that there are pull requests waiting for your review."
         )?;
         writeln!(f)?;
         for repository in &self.repo_requests {
@@ -241,8 +240,11 @@ impl Display for RepoRequests {
         writeln!(f, "Repository: {}", self.repo_id)?;
         let date_now = Utc::now();
         for pull_request in &self.pull_requests {
-            write!(f, "- <{}|{}>", pull_request.url, pull_request.title)?;
-            write!(f, " Author: {}", pull_request.created_by.name)?;
+            write!(
+                f,
+                "- <{}|{}>. Author: {}.",
+                pull_request.url, pull_request.title, pull_request.created_by.name
+            )?;
             write_formatted_duration(date_now - pull_request.creation_date, f);
             writeln!(f)?;
         }

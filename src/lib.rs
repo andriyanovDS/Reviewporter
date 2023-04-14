@@ -1,9 +1,11 @@
 use color_eyre::Result;
 use serde::Deserialize;
+use slack::SlackApi;
 use std::fs::File;
 use std::{io::Read, path::Path};
 
 mod azure;
+mod slack;
 
 #[derive(Deserialize, Debug)]
 struct Hosting {
@@ -14,8 +16,16 @@ struct Hosting {
 }
 
 #[derive(Deserialize, Debug)]
+struct Slack {
+    token: String,
+    team_id: String,
+    usergroup_id: String,
+}
+
+#[derive(Deserialize, Debug)]
 struct Config {
-    azure: Option<Hosting>,
+    azure: Hosting,
+    slack: Slack,
 }
 
 pub async fn run(config_path: &Path) -> Result<()> {
@@ -24,19 +34,28 @@ pub async fn run(config_path: &Path) -> Result<()> {
     file.read_to_string(&mut content)?;
     let config = toml::from_str::<Config>(&content)?;
 
-    if let Some(azure_hosting) = config.azure {
-        if !azure_hosting.project.is_empty() {
-            let azure = azure::AzureHostingService::new(
-                azure_hosting.token,
-                azure_hosting.base_url,
-                azure_hosting.project,
-                azure_hosting.repositories,
-            );
-            let results = azure.pull_requests().await?;
-            for result in results {
-                println!("{result}");
-            }
-        }
+    let slack = &config.slack;
+    let slack_api = SlackApi::new(&slack.token, &slack.team_id, &slack.usergroup_id);
+    let users = slack_api.obtain_users().await?;
+    tracing::info!("Slack users: {users:?}");
+
+    let azure = &config.azure;
+    if !azure.project.is_empty() {
+        let azure = azure::AzureHostingService::new(
+            &azure.token,
+            &azure.base_url,
+            &azure.project,
+            &azure.repositories,
+        );
+        let send_requests = azure.pull_requests().await?.into_iter().filter_map(|r| {
+            let Some(id) = users.get(&r.reviewer_name) else {
+                return None;
+            };
+            let request = slack_api.send_message(id.clone(), r.to_string());
+            Some(request)
+        });
+        futures::future::try_join_all(send_requests).await?;
+        tracing::info!("All messages were sent.")
     }
     Ok(())
 }
