@@ -68,7 +68,7 @@ pub struct ReviewerRequests {
     repo_requests: Vec<RepoRequests>,
 }
 
-pub struct AzureHostingService<'a> {
+pub struct AzureApi<'a> {
     token: &'a str,
     base_url: &'a Url,
     project: &'a str,
@@ -90,7 +90,7 @@ impl ApiVersion {
     }
 }
 
-impl<'a> AzureHostingService<'a> {
+impl<'a> AzureApi<'a> {
     pub fn new(
         token: &'a str,
         base_url: &'a Url,

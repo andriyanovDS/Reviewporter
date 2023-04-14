@@ -41,7 +41,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
     let azure = &config.azure;
     if !azure.project.is_empty() {
-        let azure = azure::AzureHostingService::new(
+        let azure = azure::AzureApi::new(
             &azure.token,
             &azure.base_url,
             &azure.project,
