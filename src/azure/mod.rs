@@ -113,18 +113,21 @@ impl AzureHostingService {
             let requests = self.repositories.iter().map(|repo_id| {
                 let repo_id = repo_id.clone();
                 self.reviewer_pull_requests(repo_id.clone(), reviewer.id.0.clone())
-                    .map_ok(move |pull_requests| RepoRequests {
-                        repo_id,
-                        pull_requests,
+                    .map_ok(move |mut pull_requests| {
+                        pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
+                        RepoRequests {
+                            repo_id,
+                            pull_requests,
+                        }
                     })
             });
             let reviewer_name = reviewer.name.clone();
-            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
+            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {         
                 reviewer_name,
                 repo_requests: repo_requests
                     .into_iter()
                     .filter(|r| !r.pull_requests.is_empty())
-                    .collect(),
+                    .collect()
             })
         });
         futures::future::try_join_all(requests_iter)
