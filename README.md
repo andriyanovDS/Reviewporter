@@ -1,2 +1,2 @@
 # Reviewporter
-PR Review Reminder for Slack: Sends private messages to developers with list of not yet reviewed pull requests.
+This tool is designed to help you keep track of the pull requests that are awaiting review in your Azure repository by sending a private message to each developer on Slack. With this tool, you can make sure that your team members are aware of the pending pull requests and take action to review them promptly.
