@@ -19,7 +19,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
     let azure_api = config.azure_api();
     let send_requests = azure_api
-        .pull_requests()
+        .pull_requests(|name| users.contains_key(name))
         .await?
         .into_iter()
         .filter_map(|r| {

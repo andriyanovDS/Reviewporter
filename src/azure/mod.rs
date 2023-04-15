@@ -4,9 +4,9 @@ use futures::TryFutureExt;
 use reqwest::{header::AUTHORIZATION, Client};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_repr::Deserialize_repr;
 use std::fmt::{Display, Formatter};
 use url::Url;
-use serde_repr::Deserialize_repr;
 
 #[derive(Deserialize, Clone, PartialEq, Debug)]
 struct Identifier(String);
@@ -124,7 +124,10 @@ impl<'a> AzureApi<'a> {
         }
     }
 
-    pub async fn pull_requests(&self) -> Result<Vec<ReviewerRequests>> {
+    pub async fn pull_requests<F>(&self, include_user: F) -> Result<Vec<ReviewerRequests>>
+    where
+        F: Fn(&str) -> bool,
+    {
         let teams = self.get_teams().await?;
         let dev_team = teams.into_iter().find(|v| v.name == self.team_name);
         let Some(dev_team) = dev_team else {
@@ -132,27 +135,30 @@ impl<'a> AzureApi<'a> {
             return Ok(vec![]);
         };
         let members = self.team_members(Identifier(dev_team.name)).await?;
-        let requests_iter = members.into_iter().map(|reviewer| {
-            let requests = self.repositories.iter().map(|repo_id| {
-                let repo_id = repo_id.clone();
-                self.reviewer_pull_requests(repo_id.clone(), reviewer.id.clone())
-                    .map_ok(move |mut pull_requests| {
-                        pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
-                        RepoRequests {
-                            repo_id,
-                            pull_requests,
-                        }
-                    })
+        let requests_iter = members
+            .into_iter()
+            .filter(|member| include_user(&member.name))
+            .map(|member| {
+                let reviewer_name = member.name;
+                let requests = self.repositories.iter().map(|repo_id| {
+                    let repo_id = repo_id.clone();
+                    self.reviewer_pull_requests(repo_id.clone(), member.id.clone())
+                        .map_ok(move |mut pull_requests| {
+                            pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
+                            RepoRequests {
+                                repo_id,
+                                pull_requests,
+                            }
+                        })
+                });
+                futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
+                    reviewer_name,
+                    repo_requests: repo_requests
+                        .into_iter()
+                        .filter(|r| !r.pull_requests.is_empty())
+                        .collect(),
+                })
             });
-            let reviewer_name = reviewer.name.clone();
-            futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
-                reviewer_name,
-                repo_requests: repo_requests
-                    .into_iter()
-                    .filter(|r| !r.pull_requests.is_empty())
-                    .collect(),
-            })
-        });
         let mut results = Vec::<ReviewerRequests>::new();
         for member_request in requests_iter {
             let result = member_request.await;
@@ -160,7 +166,7 @@ impl<'a> AzureApi<'a> {
                 Ok(requests) if !requests.repo_requests.is_empty() => {
                     results.push(requests);
                 }
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(error) => {
                     tracing::error!("Failed to obtain Pull Request list with error: {error:?}");
                 }
@@ -198,7 +204,10 @@ impl<'a> AzureApi<'a> {
         repository_id: String,
         reviewer_id: Identifier,
     ) -> Result<Vec<PullRequest>> {
-        tracing::info!("Requesting Pull Requests in repository {repository_id} for {}.", reviewer_id.0);
+        tracing::info!(
+            "Requesting Pull Requests in repository {repository_id} for {}.",
+            reviewer_id.0
+        );
         let mut url = self.base_url.join(&format!(
             "{}/_apis/git/repositories/{}/pullrequests",
             self.project, repository_id
@@ -215,8 +224,14 @@ impl<'a> AzureApi<'a> {
             .into_iter()
             .filter(|v| v.reviewers.iter().any(|r| r.should_be_shown(&reviewer_id)))
             .map(|mut request| {
-                let request_path = format!("{}/_git/{}/pullrequest/{}", self.project, repository_id, request.id);
-                request.url = self.base_url.join(&request_path).expect("Failed to create PR URL");
+                let request_path = format!(
+                    "{}/_git/{}/pullrequest/{}",
+                    self.project, repository_id, request.id
+                );
+                request.url = self
+                    .base_url
+                    .join(&request_path)
+                    .expect("Failed to create PR URL");
                 request
             })
             .collect();
