@@ -135,7 +135,7 @@ impl<'a> SlackApi<'a> {
     async fn make_request<T: DeserializeOwned>(&self, mut url: Url) -> Result<T> {
         let query = [("team_id", self.team_id)];
         url.query_pairs_mut().extend_pairs(query);
-        tracing::info!("Executing GET request with url: {url}");
+        tracing::debug!("Executing GET request with url: {url}");
 
         let request = self
             .client

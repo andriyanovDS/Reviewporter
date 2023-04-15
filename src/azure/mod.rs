@@ -231,7 +231,7 @@ impl<'a> AzureApi<'a> {
         let query = [api_version.query()];
         url.query_pairs_mut()
             .extend_keys_only::<[&str; 1], &str>(query);
-        tracing::info!("Executing GET request with url: {url}.");
+        tracing::debug!("Executing GET request with url: {url}.");
 
         let request = self
             .client
