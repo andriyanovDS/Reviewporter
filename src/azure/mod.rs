@@ -14,11 +14,22 @@ struct PullRequestAuthor {
 }
 
 #[derive(Deserialize, Debug)]
+enum Vote {
+    Rejected = -10,
+    WaitingForAuthor = -5,
+    NoVote = 0,
+    ApprovedWithSuggestions = 5,
+    Approved = 10,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct PullRequestReviewer {
     id: String,
     #[serde(default)]
     is_required: bool,
+    vote: Vote,
+    has_declined: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -72,6 +83,7 @@ pub struct AzureApi<'a> {
     token: &'a str,
     base_url: &'a Url,
     project: &'a str,
+    team_name: &'a str,
     repositories: &'a [String],
     client: Client,
 }
@@ -95,12 +107,14 @@ impl<'a> AzureApi<'a> {
         token: &'a str,
         base_url: &'a Url,
         project: &'a str,
+        team_name: &'a str,
         repositories: &'a [String],
     ) -> Self {
         Self {
             token,
             base_url,
             project,
+            team_name,
             repositories,
             client: Client::new(),
         }
@@ -108,7 +122,7 @@ impl<'a> AzureApi<'a> {
 
     pub async fn pull_requests(&self) -> Result<Vec<ReviewerRequests>> {
         let teams = self.get_teams().await?;
-        let dev_team = teams.into_iter().find(|v| v.name == "iOS Developers Team");
+        let dev_team = teams.into_iter().find(|v| v.name == self.team_name);
         let Some(dev_team) = dev_team else {
             tracing::info!("Team was not found.");
             return Ok(vec![]);
@@ -186,11 +200,7 @@ impl<'a> AzureApi<'a> {
             .await?;
         let requests = requests
             .into_iter()
-            .filter(|v| {
-                v.reviewers
-                    .iter()
-                    .any(|r| r.is_required && r.id == reviewer_id)
-            })
+            .filter(|v| v.reviewers.iter().any(|r| r.should_be_shown(&reviewer_id)))
             .collect();
         Ok(requests)
     }
@@ -266,5 +276,17 @@ fn write_formatted_duration(duration: Duration, f: &mut Formatter<'_>) {
 
     if days > 0 {
         write!(f, " 🔥").unwrap();
+    }
+}
+
+impl PullRequestReviewer {
+    fn should_be_shown(&self, user_id: &str) -> bool {
+        if self.id != user_id || !self.is_required || self.has_declined {
+            return false;
+        }
+        match &self.vote {
+            Vote::NoVote | Vote::WaitingForAuthor => true,
+            Vote::Rejected | Vote::Approved | Vote::ApprovedWithSuggestions => false,
+        }
     }
 }
