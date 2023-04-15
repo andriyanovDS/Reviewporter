@@ -107,6 +107,7 @@ impl<'a> SlackApi<'a> {
     }
 
     async fn obtain_user_info(&self, user_id: String) -> Result<User> {
+        tracing::info!("Requesting user {user_id} info.");
         let mut url = self.base_url.join("users.profile.get")?;
         let query = [("user", user_id.as_str())];
         url.query_pairs_mut().extend_pairs(query);
@@ -121,6 +122,7 @@ impl<'a> SlackApi<'a> {
     }
 
     async fn obtain_user_list(&self) -> Result<Vec<String>> {
+        tracing::info!("Requesting users list in group {}.", self.usergroup_id);
         let mut url = self.base_url.join("usergroups.users.list")?;
         let query = [("usergroup", self.usergroup_id)];
         url.query_pairs_mut().extend_pairs(query);

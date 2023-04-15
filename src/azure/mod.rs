@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::fmt::{Display, Formatter};
 use url::Url;
+use serde_repr::Deserialize_repr;
 
 #[derive(Deserialize, Clone, PartialEq, Debug)]
 struct Identifier(String);
@@ -16,7 +17,8 @@ struct PullRequestAuthor {
     name: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize_repr, Debug)]
+#[repr(i32)]
 enum Vote {
     Rejected = -10,
     WaitingForAuthor = -5,
@@ -40,6 +42,8 @@ struct PullRequestReviewer {
 struct PullRequest {
     title: String,
     url: Url,
+    #[serde(rename = "pullRequestId")]
+    id: usize,
     created_by: PullRequestAuthor,
     creation_date: DateTime<Utc>,
     reviewers: Vec<PullRequestReviewer>,
@@ -149,17 +153,24 @@ impl<'a> AzureApi<'a> {
                     .collect(),
             })
         });
-        futures::future::try_join_all(requests_iter)
-            .map_ok(|reviewers| {
-                reviewers
-                    .into_iter()
-                    .filter(|r| !r.repo_requests.is_empty())
-                    .collect()
-            })
-            .await
+        let mut results = Vec::<ReviewerRequests>::new();
+        for member_request in requests_iter {
+            let result = member_request.await;
+            match result {
+                Ok(requests) if !requests.repo_requests.is_empty() => {
+                    results.push(requests);
+                }
+                Ok(_) => {},
+                Err(error) => {
+                    tracing::error!("Failed to obtain Pull Request list with error: {error:?}");
+                }
+            }
+        }
+        Ok(results)
     }
 
     async fn team_members(&self, team_id: Identifier) -> Result<Vec<TeamMember>> {
+        tracing::info!("Requesting team {} members.", team_id.0);
         let url = self.base_url.join(&format!(
             "_apis/projects/{}/teams/{}/members",
             self.project, team_id.0
@@ -174,6 +185,7 @@ impl<'a> AzureApi<'a> {
     }
 
     async fn get_teams(&self) -> Result<Vec<Team>> {
+        tracing::info!("Requesting teams in project {}.", self.project);
         let url = self
             .base_url
             .join(&format!("_apis/projects/{}/teams", self.project))?;
@@ -186,6 +198,7 @@ impl<'a> AzureApi<'a> {
         repository_id: String,
         reviewer_id: Identifier,
     ) -> Result<Vec<PullRequest>> {
+        tracing::info!("Requesting Pull Requests in repository {repository_id} for {}.", reviewer_id.0);
         let mut url = self.base_url.join(&format!(
             "{}/_apis/git/repositories/{}/pullrequests",
             self.project, repository_id
@@ -201,6 +214,11 @@ impl<'a> AzureApi<'a> {
         let requests = requests
             .into_iter()
             .filter(|v| v.reviewers.iter().any(|r| r.should_be_shown(&reviewer_id)))
+            .map(|mut request| {
+                let request_path = format!("{}/_git/{}/pullrequest/{}", self.project, repository_id, request.id);
+                request.url = self.base_url.join(&request_path).expect("Failed to create PR URL");
+                request
+            })
             .collect();
         Ok(requests)
     }
@@ -213,7 +231,7 @@ impl<'a> AzureApi<'a> {
         let query = [api_version.query()];
         url.query_pairs_mut()
             .extend_keys_only::<[&str; 1], &str>(query);
-        tracing::info!("Executing GET request with url: {url}");
+        tracing::info!("Executing GET request with url: {url}.");
 
         let request = self
             .client
@@ -247,7 +265,7 @@ impl Display for RepoRequests {
         if self.pull_requests.is_empty() {
             return Ok(());
         }
-        writeln!(f, "Repository: {}", self.repo_id)?;
+        writeln!(f, "{}", self.repo_id)?;
         let date_now = Utc::now();
         for pull_request in &self.pull_requests {
             write!(
