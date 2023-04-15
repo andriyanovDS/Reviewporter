@@ -24,8 +24,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
         .into_iter()
         .filter_map(|r| {
             let Some(id) = users.get(&r.reviewer_name) else {
-            return None;
-        };
+                return None;
+            };
             let request = slack_api.send_message(id.clone(), r.to_string());
             Some(request)
         });

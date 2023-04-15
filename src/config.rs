@@ -1,6 +1,5 @@
 use crate::slack::SlackApi;
 use serde::Deserialize;
-
 use super::azure::AzureApi;
 
 #[derive(Deserialize, Debug)]

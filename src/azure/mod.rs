@@ -7,6 +7,9 @@ use serde::Deserialize;
 use std::fmt::{Display, Formatter};
 use url::Url;
 
+#[derive(Deserialize, Clone, PartialEq, Debug)]
+struct Identifier(String);
+
 #[derive(Deserialize, Debug)]
 struct PullRequestAuthor {
     #[serde(rename = "displayName")]
@@ -25,7 +28,7 @@ enum Vote {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct PullRequestReviewer {
-    id: String,
+    id: Identifier,
     #[serde(default)]
     is_required: bool,
     vote: Vote,
@@ -43,10 +46,7 @@ struct PullRequest {
 }
 
 #[derive(Deserialize, Debug)]
-struct Identifier(String);
-
-#[derive(Deserialize, Debug)]
-struct Reviewer {
+struct TeamMember {
     id: Identifier,
     #[serde(rename = "displayName")]
     name: String,
@@ -55,8 +55,8 @@ struct Reviewer {
 }
 
 #[derive(Deserialize, Debug)]
-struct ReviewerContainer {
-    identity: Reviewer,
+struct TeamMemberContainer {
+    identity: TeamMember,
 }
 
 #[derive(Deserialize, Debug)]
@@ -127,11 +127,11 @@ impl<'a> AzureApi<'a> {
             tracing::info!("Team was not found.");
             return Ok(vec![]);
         };
-        let members = self.team_members(dev_team.name).await?;
+        let members = self.team_members(Identifier(dev_team.name)).await?;
         let requests_iter = members.into_iter().map(|reviewer| {
             let requests = self.repositories.iter().map(|repo_id| {
                 let repo_id = repo_id.clone();
-                self.reviewer_pull_requests(repo_id.clone(), reviewer.id.0.clone())
+                self.reviewer_pull_requests(repo_id.clone(), reviewer.id.clone())
                     .map_ok(move |mut pull_requests| {
                         pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
                         RepoRequests {
@@ -159,12 +159,12 @@ impl<'a> AzureApi<'a> {
             .await
     }
 
-    async fn team_members(&self, team_id: String) -> Result<Vec<Reviewer>> {
+    async fn team_members(&self, team_id: Identifier) -> Result<Vec<TeamMember>> {
         let url = self.base_url.join(&format!(
             "_apis/projects/{}/teams/{}/members",
-            self.project, team_id
+            self.project, team_id.0
         ))?;
-        self.make_request::<Vec<ReviewerContainer>>(url, ApiVersion::Six)
+        self.make_request::<Vec<TeamMemberContainer>>(url, ApiVersion::Six)
             .await
             .map(|v| {
                 v.into_iter()
@@ -184,14 +184,14 @@ impl<'a> AzureApi<'a> {
     async fn reviewer_pull_requests(
         &self,
         repository_id: String,
-        reviewer_id: String,
+        reviewer_id: Identifier,
     ) -> Result<Vec<PullRequest>> {
         let mut url = self.base_url.join(&format!(
             "{}/_apis/git/repositories/{}/pullrequests",
             self.project, repository_id
         ))?;
         let queries = [
-            ("searchCriteria.reviewerId", reviewer_id.as_str()),
+            ("searchCriteria.reviewerId", reviewer_id.0.as_str()),
             ("searchCriteria.status", "active"),
         ];
         url.query_pairs_mut().extend_pairs(queries);
@@ -280,8 +280,8 @@ fn write_formatted_duration(duration: Duration, f: &mut Formatter<'_>) {
 }
 
 impl PullRequestReviewer {
-    fn should_be_shown(&self, user_id: &str) -> bool {
-        if self.id != user_id || !self.is_required || self.has_declined {
+    fn should_be_shown(&self, user_id: &Identifier) -> bool {
+        if &self.id != user_id || !self.is_required || self.has_declined {
             return false;
         }
         match &self.vote {
