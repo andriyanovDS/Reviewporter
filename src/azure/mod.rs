@@ -251,7 +251,7 @@ impl<'a> AzureApi<'a> {
         let request = self
             .client
             .get(url)
-            .header(AUTHORIZATION, format!("Basic {}", self.token))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .build()?;
         let response = self.client.execute(request).await?;
         let response = response.json::<Response<T>>().await;
