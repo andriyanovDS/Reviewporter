@@ -17,7 +17,7 @@ struct PullRequestAuthor {
     name: String,
 }
 
-#[derive(Deserialize_repr, Debug)]
+#[derive(Deserialize_repr, Debug, PartialEq)]
 #[repr(i32)]
 enum Vote {
     Rejected = -10,
@@ -31,6 +31,8 @@ enum Vote {
 #[serde(rename_all = "camelCase")]
 struct PullRequestReviewer {
     id: Identifier,
+    #[serde(rename = "displayName")]
+    name: String,
     #[serde(default)]
     is_required: bool,
     vote: Vote,
@@ -68,6 +70,11 @@ struct Team {
     name: String,
 }
 
+enum PullRequestSearchCriteria {
+    Reviewer(Identifier),
+    Creator(Identifier),
+}
+
 #[derive(Deserialize, Debug)]
 struct Response<T> {
     value: T,
@@ -80,7 +87,8 @@ struct RepoRequests {
 
 pub struct ReviewerRequests {
     pub reviewer_name: String,
-    repo_requests: Vec<RepoRequests>,
+    waiting_for_review: Vec<RepoRequests>,
+    waiting_by_reviewers: Vec<RepoRequests>,
 }
 
 pub struct AzureApi<'a> {
@@ -141,32 +149,69 @@ impl<'a> AzureApi<'a> {
             .map(|member| {
                 let reviewer_name = member.name;
                 let requests = self.repositories.iter().map(|repo_id| {
-                    let repo_id = repo_id.clone();
-                    self.reviewer_pull_requests(repo_id.clone(), member.id.clone())
-                        .map_ok(move |mut pull_requests| {
-                            pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
-                            RepoRequests {
-                                repo_id,
-                                pull_requests,
-                            }
-                        })
+                    let member_id = member.id.clone();
+                    tracing::info!(
+                        "Requesting Pull Requests for review in repository {repo_id} for {}.",
+                        member.id.0
+                    );
+                    self.obtain_pull_requests(
+                        repo_id,
+                        PullRequestSearchCriteria::Reviewer(member_id.clone()),
+                        move |r| r.should_be_shown_to_reviewer(&member_id),
+                    )
+                    .map_ok(move |mut pull_requests| {
+                        pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
+                        RepoRequests {
+                            repo_id: repo_id.clone(),
+                            pull_requests,
+                        }
+                    })
                 });
-                futures::future::try_join_all(requests).map_ok(|repo_requests| ReviewerRequests {
-                    reviewer_name,
-                    repo_requests: repo_requests
-                        .into_iter()
-                        .filter(|r| !r.pull_requests.is_empty())
-                        .collect(),
+                let member_id = member.id.clone();
+                let waiting_by_reviewers = self.repositories.iter().map(move |repo_id| {
+                    tracing::info!(
+                        "Requesting {} own Pull Requests in repository {repo_id}",
+                        member_id.0
+                    );
+                    self.obtain_pull_requests(
+                        repo_id,
+                        PullRequestSearchCriteria::Creator(member_id.clone()),
+                        |r| r.should_be_shown_to_creator(),
+                    )
+                    .map_ok(move |mut pull_requests| {
+                        pull_requests.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
+                        RepoRequests {
+                            repo_id: repo_id.clone(),
+                            pull_requests,
+                        }
+                    })
+                });
+                futures::future::try_join_all(requests).and_then(|waiting_for_review| {
+                    futures::future::try_join_all(waiting_by_reviewers).map_ok(
+                        |waiting_by_reviewers| ReviewerRequests {
+                            reviewer_name,
+                            waiting_for_review: waiting_for_review
+                                .into_iter()
+                                .filter(|r| !r.pull_requests.is_empty())
+                                .collect(),
+                            waiting_by_reviewers: waiting_by_reviewers
+                                .into_iter()
+                                .filter(|r| !r.pull_requests.is_empty())
+                                .collect(),
+                        },
+                    )
                 })
             });
         let mut results = Vec::<ReviewerRequests>::new();
         for member_request in requests_iter {
             let result = member_request.await;
             match result {
-                Ok(requests) if !requests.repo_requests.is_empty() => {
-                    results.push(requests);
+                Ok(r) if !r.waiting_for_review.is_empty() || !r.waiting_by_reviewers.is_empty() => {
+                    results.push(r);
                 }
-                Ok(_) => {}
+                Ok(r) => {
+                    tracing::info!("Empty req {:?}", r.reviewer_name);
+                }
                 Err(error) => {
                     tracing::error!("Failed to obtain Pull Request list with error: {error:?}");
                 }
@@ -199,30 +244,22 @@ impl<'a> AzureApi<'a> {
             .await
     }
 
-    async fn reviewer_pull_requests(
+    async fn obtain_pull_requests<F>(
         &self,
-        repository_id: String,
-        reviewer_id: Identifier,
-    ) -> Result<Vec<PullRequest>> {
-        tracing::info!(
-            "Requesting Pull Requests in repository {repository_id} for {}.",
-            reviewer_id.0
-        );
-        let mut url = self.base_url.join(&format!(
-            "{}/_apis/git/repositories/{}/pullrequests",
-            self.project, repository_id
-        ))?;
-        let queries = [
-            ("searchCriteria.reviewerId", reviewer_id.0.as_str()),
-            ("searchCriteria.status", "active"),
-        ];
-        url.query_pairs_mut().extend_pairs(queries);
+        repository_id: &str,
+        search_creteria: PullRequestSearchCriteria,
+        filter: F,
+    ) -> Result<Vec<PullRequest>>
+    where
+        F: Fn(&PullRequestReviewer) -> bool,
+    {
+        let url = self.make_pull_requests_url(repository_id, search_creteria)?;
         let requests = self
             .make_request::<Vec<PullRequest>>(url, ApiVersion::Six)
             .await?;
         let requests = requests
             .into_iter()
-            .filter(|v| v.reviewers.iter().any(|r| r.should_be_shown(&reviewer_id)))
+            .filter(|v| v.reviewers.iter().any(&filter))
             .map(|mut request| {
                 let request_path = format!(
                     "{}/_git/{}/pullrequest/{}",
@@ -236,6 +273,20 @@ impl<'a> AzureApi<'a> {
             })
             .collect();
         Ok(requests)
+    }
+
+    fn make_pull_requests_url(
+        &self,
+        repository_id: &str,
+        search_creteria: PullRequestSearchCriteria,
+    ) -> Result<Url> {
+        let mut url = self.base_url.join(&format!(
+            "{}/_apis/git/repositories/{}/pullrequests",
+            self.project, repository_id
+        ))?;
+        let queries = [search_creteria.query(), ("searchCriteria.status", "active")];
+        url.query_pairs_mut().extend_pairs(queries);
+        Ok(url)
     }
 
     async fn make_request<T: DeserializeOwned>(
@@ -262,21 +313,29 @@ impl<'a> AzureApi<'a> {
 impl Display for ReviewerRequests {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Hey!")?;
-        writeln!(
-            f,
-            "Just a friendly reminder that there are pull requests waiting for your review."
-        )?;
-        writeln!(f)?;
-        for repository in &self.repo_requests {
-            repository.fmt(f)?;
+        write!(f, "Just a friendly reminder that there are ")?;
+        if !self.waiting_for_review.is_empty() {
+            writeln!(f, "Pull Requests waiting for your review:")?;
             writeln!(f)?;
+            for repository in &self.waiting_for_review {
+                repository.format_for_reviewer(f)?;
+                writeln!(f)?;
+            }
+        }
+        if !self.waiting_by_reviewers.is_empty() {
+            writeln!(f, "Pull Requests where reviewers are waiting for you:")?;
+            writeln!(f)?;
+            for repository in &self.waiting_by_reviewers {
+                repository.format_for_creator(f)?;
+                writeln!(f)?;
+            }
         }
         Ok(())
     }
 }
 
-impl Display for RepoRequests {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl RepoRequests {
+    fn format_for_reviewer(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.pull_requests.is_empty() {
             return Ok(());
         }
@@ -289,6 +348,30 @@ impl Display for RepoRequests {
                 pull_request.url, pull_request.title, pull_request.created_by.name
             )?;
             write_formatted_duration(date_now - pull_request.creation_date, f);
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+
+    fn format_for_creator(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        assert!(!self.pull_requests.is_empty());
+        writeln!(f, "{}", self.repo_id)?;
+        let date_now = Utc::now();
+        for pull_request in &self.pull_requests {
+            write!(f, "- <{}|{}>.", pull_request.url, pull_request.title)?;
+            write_formatted_duration(date_now - pull_request.creation_date, f);
+            writeln!(f)?;
+            write!(f, "Waiting: ")?;
+            let waiting_reviewers = pull_request
+                .reviewers
+                .iter()
+                .filter_map(|r| (r.vote == Vote::WaitingForAuthor).then_some(r.name.as_str()));
+            for (index, name) in waiting_reviewers.enumerate() {
+                if index != 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", name)?;
+            }
             writeln!(f)?;
         }
         Ok(())
@@ -313,13 +396,26 @@ fn write_formatted_duration(duration: Duration, f: &mut Formatter<'_>) {
 }
 
 impl PullRequestReviewer {
-    fn should_be_shown(&self, user_id: &Identifier) -> bool {
+    fn should_be_shown_to_reviewer(&self, user_id: &Identifier) -> bool {
         if &self.id != user_id || !self.is_required || self.has_declined {
             return false;
         }
         match &self.vote {
             Vote::NoVote | Vote::WaitingForAuthor => true,
             Vote::Rejected | Vote::Approved | Vote::ApprovedWithSuggestions => false,
+        }
+    }
+
+    fn should_be_shown_to_creator(&self) -> bool {
+        self.vote == Vote::WaitingForAuthor
+    }
+}
+
+impl PullRequestSearchCriteria {
+    fn query(&self) -> (&str, &str) {
+        match self {
+            Self::Reviewer(id) => ("searchCriteria.reviewerId", id.0.as_str()),
+            Self::Creator(id) => ("searchCriteria.creatorId", id.0.as_str()),
         }
     }
 }
