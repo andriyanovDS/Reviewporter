@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 use std::fmt::{Display, Formatter};
 use url::Url;
+use html_escape;
 
 #[derive(Deserialize, Clone, PartialEq, Debug)]
 struct Identifier(String);
@@ -210,7 +211,7 @@ impl<'a> AzureApi<'a> {
                     results.push(r);
                 }
                 Ok(r) => {
-                    tracing::info!("Empty req {:?}", r.reviewer_name);
+                    tracing::info!("There're no requests for {:?}", r.reviewer_name);
                 }
                 Err(error) => {
                     tracing::error!("Failed to obtain Pull Request list with error: {error:?}");
@@ -342,11 +343,9 @@ impl RepoRequests {
         writeln!(f, "{}", self.repo_id)?;
         let date_now = Utc::now();
         for pull_request in &self.pull_requests {
-            write!(
-                f,
-                "- <{}|{}>. Author: {}.",
-                pull_request.url, pull_request.title, pull_request.created_by.name
-            )?;
+            write!(f, "- ")?;
+            write_link(f, &pull_request.url, pull_request.title.as_str());
+            write!(f, ". Author: {}.", pull_request.created_by.name)?;
             write_formatted_duration(date_now - pull_request.creation_date, f);
             writeln!(f)?;
         }
@@ -358,7 +357,8 @@ impl RepoRequests {
         writeln!(f, "{}", self.repo_id)?;
         let date_now = Utc::now();
         for pull_request in &self.pull_requests {
-            write!(f, "- <{}|{}>.", pull_request.url, pull_request.title)?;
+            write!(f, "- ")?;
+            write_link(f, &pull_request.url, pull_request.title.as_str());
             write_formatted_duration(date_now - pull_request.creation_date, f);
             writeln!(f)?;
             write!(f, "Waiting: ")?;
@@ -376,6 +376,10 @@ impl RepoRequests {
         }
         Ok(())
     }
+}
+
+fn write_link(f: &mut Formatter<'_>, url: &Url, message: &str) {
+    write!(f, "<{url}|{}>", html_escape::encode_text(message)).unwrap();
 }
 
 fn write_formatted_duration(duration: Duration, f: &mut Formatter<'_>) {
