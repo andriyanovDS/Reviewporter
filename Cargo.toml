@@ -6,10 +6,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1.71"
 chrono = { version = "0.4.24", features = ["serde"] }
+clap = { version = "4.3.11", features = ["derive"] }
 color-eyre = "0.6.2"
 futures = "0.3.28"
 html-escape = "0.2.13"
+itertools = "0.11.0"
+rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["rustls-tls", "json"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_repr = "0.1.12"
@@ -18,3 +22,6 @@ toml = "0.7.3"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 url = { version = "2.3.1", features = ["serde"] }
+
+[dev-dependencies]
+mockall = "0.11.4"

@@ -1,16 +1,24 @@
+use clap::Parser;
 use color_eyre::Result;
+use reviewporter::cli::{Cli, Command};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
     configure_logging()?;
-    let Some(config_path) = std::env::args().nth(1) else {
-        println!("Usage: revp <path to config>");
-        return Ok(());
-    };
-    tracing::info!("Config path: {config_path}");
-    reviewporter::run(std::path::Path::new(&config_path)).await
+
+    tracing::info!("Config path: {:?}", cli.config);
+    match cli.command {
+        Command::AddReviewers {
+            repository,
+            request_id,
+        } => reviewporter::add_reviewers(&cli.config, request_id, repository).await,
+        Command::SendReports { repositories } => {
+            reviewporter::send_reports(repositories, &cli.config).await
+        }
+    }
 }
 
 fn configure_logging() -> Result<()> {
@@ -20,13 +28,13 @@ fn configure_logging() -> Result<()> {
     color_eyre::install()?;
 
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info")
+        std::env::set_var("RUST_LOG", "verbose")
     }
     let format = fmt::format()
         .with_source_location(false)
         .with_file(false)
         .with_target(false)
-        .with_timer(fmt::time::SystemTime::default())
+        .with_timer(fmt::time::SystemTime)
         .compact();
 
     fmt::fmt()
