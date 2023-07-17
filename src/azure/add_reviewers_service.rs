@@ -106,8 +106,10 @@ where
 
         let required_reviewers_team = team.and_then(|team| team.required_reviewers_team.clone());
         let required_reviewers = if let Some(team_name) = required_reviewers_team {
+            tracing::info!("Required reviewers team is {team_name}.");
             self.api.team_members(Identifier(team_name)).await?
         } else {
+            tracing::info!("Author's team does not have requied reviwers.");
             vec![]
         };
 
@@ -139,7 +141,7 @@ where
         for team in self.config.teams {
             let members = self.api.team_members(Identifier(team.name.clone())).await?;
             if members.iter().any(|member| &member.id == author_id) {
-                tracing::info!("PR author found in {} team", team.name);
+                tracing::info!("PR author found in {} team.", team.name);
                 return Ok((members, Some(team)));
             }
         }
@@ -174,6 +176,8 @@ where
             );
             return Ok(());
         }
+
+        tracing::info!("Received pull request: {pull_request:?}");
 
         let author_id = &pull_request.created_by.id;
         let existing_reviewers = pull_request
