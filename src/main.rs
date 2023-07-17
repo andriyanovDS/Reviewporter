@@ -28,7 +28,7 @@ fn configure_logging() -> Result<()> {
     color_eyre::install()?;
 
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "verbose")
+        std::env::set_var("RUST_LOG", "debug")
     }
     let format = fmt::format()
         .with_source_location(false)
