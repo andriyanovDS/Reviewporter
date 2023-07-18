@@ -225,7 +225,7 @@ where
             })
             .for_each(|member| new_reviewers.push(member.id));
 
-        let new_reviwers = new_reviewers
+        let new_reviewers = new_reviewers
             .into_iter()
             .enumerate()
             .map(|(index, id)| NewPullRequestReviewer {
@@ -234,9 +234,18 @@ where
             })
             .collect::<Vec<_>>();
 
-        tracing::info!("New reviewers will be added: {new_reviwers:?}");
+        if new_reviewers.is_empty() {
+            tracing::info!("No new reviewers will be added.");
+            return Ok(());
+        }
+
+        tracing::info!("New reviewers will be added: {new_reviewers:?}");
         self.api
-            .add_reviewers_to_pull_request(&self.repository_id, &self.pull_request_id, new_reviwers)
+            .add_reviewers_to_pull_request(
+                &self.repository_id,
+                &self.pull_request_id,
+                new_reviewers,
+            )
             .await
     }
 }
